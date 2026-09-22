@@ -24,19 +24,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Plugins
   await app.register(cors, {
     origin: (origin, cb) => {
-      const allowedOrigins = [
-        process.env.CORS_ORIGIN,
-        'http://localhost:5173',
-        'http://127.0.0.1:5173',
-        'http://192.168.1.13:5173',
-        'http://localhost:3000'
-      ].filter(Boolean) as string[]
-
-      if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV === 'development') {
-        cb(null, true)
-        return
-      }
-      cb(new Error('Not allowed by CORS'), false)
+      // Liberando CORS para MVP
+      cb(null, true)
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
