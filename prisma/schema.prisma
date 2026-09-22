@@ -1,0 +1,308 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id            String         @id @default(cuid())
+  name          String
+  email         String         @unique
+  passwordHash  String         @map("password_hash")
+  role          Role           @default(BUYER)
+  companyId     String?        @map("company_id")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  refreshTokens RefreshToken[]
+  orderMessages OrderMessage[]
+  company       Company?       @relation(fields: [companyId], references: [id])
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+model Company {
+  id                String             @id @default(cuid())
+  name              String
+  cnpj              String             @unique
+  phone             String?
+  email             String?
+  role              Role
+  active            Boolean            @default(true)
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+  addresses         Address[]
+  buyerRequests     BuyerRequest[]
+  wallet            CreditWallet?
+  ordersAsBuyer     Order[]            @relation("BuyerOrders")
+  ordersAsSupplier  Order[]            @relation("SupplierOrders")
+  supplierCoverages SupplierCoverage[]
+  proposals         SupplierProposal[]
+  ratingsGiven      SupplierRating[]   @relation("BuyerRatings")
+  ratingsReceived   SupplierRating[]   @relation("SupplierRatings")
+  users             User[]
+  supplierProducts  SupplierProduct[]
+
+  @@map("companies")
+}
+
+model Address {
+  id            String         @id @default(cuid())
+  companyId     String         @map("company_id")
+  street        String
+  number        String
+  complement    String?
+  neighborhood  String
+  city          String
+  state         String         @db.Char(2)
+  zipCode       String         @map("zip_code")
+  latitude      Float?
+  longitude     Float?
+  isMain        Boolean        @default(false) @map("is_main")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  company       Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  buyerRequests BuyerRequest[]
+
+  @@map("addresses")
+}
+
+model Product {
+  id            String         @id @default(cuid())
+  name          String
+  sku           String         @unique
+  description   String?
+  unit          String         @default("kg")
+  weightKg      Float          @map("weight_kg")
+  active        Boolean        @default(true)
+  createdAt     DateTime       @default(now()) @map("created_at")
+  buyerRequestItems BuyerRequestItem[]
+  supplierProducts  SupplierProduct[]
+
+  @@map("products")
+}
+
+model SupplierProduct {
+  id                String      @id @default(cuid())
+  supplierCompanyId String      @map("supplier_company_id")
+  productId         String      @map("product_id")
+  active            Boolean     @default(true)
+  biddingMode       BiddingMode @default(BOTH) @map("bidding_mode")
+  
+  defaultPrice      Float?      @map("default_price")
+
+  createdAt         DateTime    @default(now()) @map("created_at")
+  updatedAt         DateTime    @updatedAt @map("updated_at")
+
+  supplierCompany   Company     @relation(fields: [supplierCompanyId], references: [id], onDelete: Cascade)
+  product           Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([supplierCompanyId, productId])
+  @@map("supplier_products")
+}
+
+model BuyerRequest {
+  id             String             @id @default(cuid())
+  buyerCompanyId String             @map("buyer_company_id")
+  addressId      String             @map("address_id")
+  deadline       DateTime
+  expiresAt      DateTime           @map("expires_at")
+  observations   String?
+  status         BuyerRequestStatus @default(DRAFT)
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  address        Address            @relation(fields: [addressId], references: [id])
+  buyerCompany   Company            @relation(fields: [buyerCompanyId], references: [id])
+  items          BuyerRequestItem[]
+  order          Order?
+  proposals      SupplierProposal[]
+
+  @@map("buyer_requests")
+}
+
+model BuyerRequestItem {
+  id             String       @id @default(cuid())
+  buyerRequestId String       @map("buyer_request_id")
+  productId      String       @map("product_id")
+  quantity       Int
+  buyerRequest   BuyerRequest @relation(fields: [buyerRequestId], references: [id], onDelete: Cascade)
+  product        Product      @relation(fields: [productId], references: [id])
+  supplierProposalItems SupplierProposalItem[]
+
+  @@map("buyer_request_items")
+}
+
+model SupplierCoverage {
+  id                String   @id @default(cuid())
+  supplierCompanyId String   @map("supplier_company_id")
+  city              String
+  state             String   @db.Char(2)
+  radiusKm          Float?   @map("radius_km")
+  createdAt         DateTime @default(now()) @map("created_at")
+  supplierCompany   Company  @relation(fields: [supplierCompanyId], references: [id], onDelete: Cascade)
+
+  @@map("supplier_coverages")
+}
+
+model SupplierProposal {
+  id                String         @id @default(cuid())
+  buyerRequestId    String         @map("buyer_request_id")
+  supplierCompanyId String         @map("supplier_company_id")
+  freightPrice      Float          @default(0) @map("freight_price")
+  deliveryDeadline  DateTime       @map("delivery_deadline")
+  paymentTerms      String?        @map("payment_terms")
+  observations      String?
+  status            ProposalStatus @default(SUBMITTED)
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+  order             Order?
+  buyerRequest      BuyerRequest   @relation(fields: [buyerRequestId], references: [id])
+  supplierCompany   Company        @relation(fields: [supplierCompanyId], references: [id])
+  items             SupplierProposalItem[]
+
+  @@unique([buyerRequestId, supplierCompanyId])
+  @@map("supplier_proposals")
+}
+
+model SupplierProposalItem {
+  id                 String           @id @default(cuid())
+  supplierProposalId String           @map("supplier_proposal_id")
+  buyerRequestItemId String           @map("buyer_request_item_id")
+  unitPrice          Float            @map("unit_price")
+  supplierProposal   SupplierProposal @relation(fields: [supplierProposalId], references: [id], onDelete: Cascade)
+  buyerRequestItem   BuyerRequestItem @relation(fields: [buyerRequestItemId], references: [id])
+
+  @@map("supplier_proposal_items")
+}
+
+model Order {
+  id                String           @id @default(cuid())
+  buyerRequestId    String           @unique @map("buyer_request_id")
+  proposalId        String           @unique @map("proposal_id")
+  buyerCompanyId    String           @map("buyer_company_id")
+  supplierCompanyId String           @map("supplier_company_id")
+  status            OrderStatus      @default(CREATED)
+  totalPrice        Float            @map("total_price")
+  confirmedAt       DateTime?        @map("confirmed_at")
+  deliveredAt       DateTime?        @map("delivered_at")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+  timeline          OrderTimeline[]
+  messages          OrderMessage[]
+  buyerCompany      Company          @relation("BuyerOrders", fields: [buyerCompanyId], references: [id])
+  buyerRequest      BuyerRequest     @relation(fields: [buyerRequestId], references: [id])
+  proposal          SupplierProposal @relation(fields: [proposalId], references: [id])
+  rating            SupplierRating?
+  supplierCompany   Company          @relation("SupplierOrders", fields: [supplierCompanyId], references: [id])
+
+  @@map("orders")
+}
+
+model OrderTimeline {
+  id        String      @id @default(cuid())
+  orderId   String      @map("order_id")
+  status    OrderStatus
+  notes     String?
+  createdAt DateTime    @default(now()) @map("created_at")
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("order_timelines")
+}
+
+model OrderMessage {
+  id        String   @id @default(cuid())
+  orderId   String   @map("order_id")
+  senderId  String   @map("sender_id")
+  content   String
+  createdAt DateTime @default(now()) @map("created_at")
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sender    User     @relation(fields: [senderId], references: [id])
+
+  @@map("order_messages")
+}
+
+model CreditWallet {
+  id        String   @id @default(cuid())
+  companyId String   @unique @map("company_id")
+  balance   Float    @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("credit_wallets")
+}
+
+model SupplierRating {
+  id                String   @id @default(cuid())
+  orderId           String   @unique @map("order_id")
+  buyerCompanyId    String   @map("buyer_company_id")
+  supplierCompanyId String   @map("supplier_company_id")
+  stars             Int
+  comment           String?
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  order           Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  buyerCompany    Company @relation("BuyerRatings", fields: [buyerCompanyId], references: [id], onDelete: Cascade)
+  supplierCompany Company @relation("SupplierRatings", fields: [supplierCompanyId], references: [id], onDelete: Cascade)
+
+  @@map("supplier_ratings")
+}
+
+model SystemSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("system_settings")
+}
+
+enum Role {
+  BUYER
+  SUPPLIER
+  ADMIN
+}
+
+enum BiddingMode {
+  AUTO_ONLY
+  MANUAL_ONLY
+  BOTH
+}
+
+enum BuyerRequestStatus {
+  DRAFT
+  OPEN
+  UNDER_REVIEW
+  AWARDED
+  CANCELLED
+  EXPIRED
+}
+
+enum ProposalStatus {
+  SUBMITTED
+  UPDATED
+  WITHDRAWN
+  ACCEPTED
+  REJECTED
+  COUNTER_OFFER
+}
+
+enum OrderStatus {
+  CREATED
+  CONFIRMED
+  IN_DELIVERY
+  DELIVERED
+  CANCELLED
+}
