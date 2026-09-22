@@ -1,4 +1,5 @@
 import {
+  addSupplierProductSchema,
   createBuyerRequestSchema,
   createOrderMessageSchema,
   createProposalSchema,
@@ -6,8 +7,9 @@ import {
   paginationSchema,
   refreshSchema,
   registerSchema,
-  updateOrderStatusSchema
-} from "./chunk-W5TAXQLO.mjs";
+  updateOrderStatusSchema,
+  updateSupplierProductSchema
+} from "./chunk-WHP2FAK7.mjs";
 import {
   wsManager
 } from "./chunk-R6BVMBVM.mjs";
@@ -234,6 +236,62 @@ async function createBuyerRequestUseCase(data) {
     }
   });
   try {
+    const coverages = await prisma.supplierCoverage.findMany({
+      where: { city: address.city, state: address.state },
+      select: { supplierCompanyId: true }
+    });
+    const coverageCompanyIds = coverages.map((c) => c.supplierCompanyId);
+    if (coverageCompanyIds.length > 0) {
+      const supplierAddresses = await prisma.address.findMany({
+        where: { companyId: { in: coverageCompanyIds } }
+      });
+      for (const supplierCompanyId of coverageCompanyIds) {
+        const sAddr = supplierAddresses.find((a) => a.companyId === supplierCompanyId && a.isMain) || supplierAddresses.find((a) => a.companyId === supplierCompanyId);
+        if (!sAddr || sAddr.latitude == null || sAddr.longitude == null || address.latitude == null || address.longitude == null) continue;
+        const requestedProductIds = items.map((i) => i.productId);
+        const supplierCatalog = await prisma.supplierProduct.findMany({
+          where: {
+            supplierCompanyId,
+            productId: { in: requestedProductIds },
+            active: true,
+            biddingMode: { in: ["AUTO_ONLY", "BOTH"] }
+          }
+        });
+        if (supplierCatalog.length !== requestedProductIds.length) continue;
+        let canFulfill = true;
+        const proposalItemsData = [];
+        for (const reqItem of request.items) {
+          const cat = supplierCatalog.find((c) => c.productId === reqItem.productId);
+          if (!cat || cat.defaultPrice === null) {
+            canFulfill = false;
+            break;
+          }
+          proposalItemsData.push({
+            buyerRequestItemId: reqItem.id,
+            unitPrice: cat.defaultPrice
+          });
+        }
+        if (canFulfill) {
+          await prisma.supplierProposal.create({
+            data: {
+              buyerRequestId: request.id,
+              supplierCompanyId,
+              freightPrice: 0,
+              deliveryDeadline: new Date(data.deadline),
+              // Auto bid uses buyer's deadline
+              status: "SUBMITTED",
+              items: {
+                create: proposalItemsData
+              }
+            }
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Error in auto-bidding logic", err);
+  }
+  try {
     const suppliersInRegion = await prisma.supplierCoverage.findMany({
       where: { city: address.city, state: address.state },
       select: { supplierCompanyId: true }
@@ -411,8 +469,7 @@ async function listOpportunitiesUseCase(supplierCompanyId, page, limit, showAppl
       where: {
         status: "OPEN",
         expiresAt: { gt: /* @__PURE__ */ new Date() },
-        OR: orConditions,
-        ...showApplied ? {} : { proposals: { none: { supplierCompanyId } } }
+        OR: orConditions
       },
       include: {
         items: { include: { product: true } },
@@ -432,8 +489,7 @@ async function listOpportunitiesUseCase(supplierCompanyId, page, limit, showAppl
       where: {
         status: "OPEN",
         expiresAt: { gt: /* @__PURE__ */ new Date() },
-        OR: orConditions,
-        ...showApplied ? {} : { proposals: { none: { supplierCompanyId } } }
+        OR: orConditions
       }
     })
   ]);
@@ -959,7 +1015,7 @@ async function buyerRequestRoutes(app) {
   });
   app.addHook("preHandler", authenticate);
   app.post("/companies/:companyId/addresses", async (req, reply) => {
-    const { createAddressSchema } = await import("./schemas-4ZWUF4JU.mjs");
+    const { createAddressSchema } = await import("./schemas-D5PU4PU3.mjs");
     const { companyId } = req.params;
     const data = createAddressSchema.parse(req.body);
     const address = await prisma.address.create({ data: { ...data, companyId } });
@@ -1002,7 +1058,8 @@ async function listOrdersUseCase(companyId, role, page, limit) {
         buyerCompany: { select: { id: true, name: true } },
         supplierCompany: { select: { id: true, name: true } },
         proposal: { include: { items: true } },
-        rating: true
+        rating: true,
+        _count: { select: { messages: true } }
       },
       orderBy: { createdAt: "desc" },
       skip: (page - 1) * limit,
@@ -1020,7 +1077,8 @@ async function getOrderUseCase(id, companyId) {
       buyerCompany: { select: { id: true, name: true, cnpj: true } },
       supplierCompany: { select: { id: true, name: true, cnpj: true } },
       proposal: { include: { items: true } },
-      timeline: { orderBy: { createdAt: "asc" } }
+      timeline: { orderBy: { createdAt: "asc" } },
+      _count: { select: { messages: true } }
     }
   });
   if (!order) throw new NotFoundError("Pedido");
@@ -1328,6 +1386,241 @@ async function adminRoutes(app) {
   app.put("/admin/settings", updateSystemSettingsController);
 }
 
+// src/use-cases/supplier-products.ts
+async function getGlobalProductsUseCase() {
+  return prisma.product.findMany({
+    where: { active: true },
+    orderBy: { name: "asc" }
+  });
+}
+async function getSupplierProductsUseCase(supplierCompanyId) {
+  return prisma.supplierProduct.findMany({
+    where: { supplierCompanyId },
+    include: { product: true },
+    orderBy: { createdAt: "desc" }
+  });
+}
+async function addSupplierProductUseCase(supplierCompanyId, productId) {
+  const existing = await prisma.supplierProduct.findUnique({
+    where: {
+      supplierCompanyId_productId: { supplierCompanyId, productId }
+    }
+  });
+  if (existing) {
+    throw new AppError("Produto j\xE1 est\xE1 associado a este fornecedor.");
+  }
+  return prisma.supplierProduct.create({
+    data: {
+      supplierCompanyId,
+      productId
+    },
+    include: { product: true }
+  });
+}
+async function updateSupplierProductUseCase(id, supplierCompanyId, isAdmin, data) {
+  const supplierProduct = await prisma.supplierProduct.findUnique({
+    where: { id }
+  });
+  if (!supplierProduct) throw new NotFoundError("Produto do Fornecedor");
+  if (!isAdmin && supplierProduct.supplierCompanyId !== supplierCompanyId) {
+    throw new ForbiddenError();
+  }
+  const updateData = { ...data };
+  if (!isAdmin && data.active !== void 0) {
+    delete updateData.active;
+  }
+  return prisma.supplierProduct.update({
+    where: { id },
+    data: updateData,
+    include: { product: true }
+  });
+}
+async function removeSupplierProductUseCase(id, isAdmin, supplierCompanyId) {
+  const supplierProduct = await prisma.supplierProduct.findUnique({
+    where: { id }
+  });
+  if (!supplierProduct) throw new NotFoundError("Produto do Fornecedor");
+  if (!isAdmin && supplierProduct.supplierCompanyId !== supplierCompanyId) {
+    throw new ForbiddenError();
+  }
+  await prisma.supplierProduct.delete({
+    where: { id }
+  });
+}
+
+// src/http/controllers/supplier-products.controller.ts
+async function listGlobalProductsController(req, reply) {
+  const products = await getGlobalProductsUseCase();
+  return reply.send(products);
+}
+async function listSupplierProductsController(req, reply) {
+  const user = req.user;
+  const { id } = req.params;
+  const supplierId = user.role === "ADMIN" ? id : user.companyId;
+  const products = await getSupplierProductsUseCase(supplierId);
+  return reply.send(products);
+}
+async function listMySupplierProductsController(req, reply) {
+  const user = req.user;
+  const products = await getSupplierProductsUseCase(user.companyId);
+  return reply.send(products);
+}
+async function addSupplierProductController(req, reply) {
+  const user = req.user;
+  const { id: supplierCompanyId } = req.params;
+  const { productId } = addSupplierProductSchema.parse(req.body);
+  const product = await addSupplierProductUseCase(supplierCompanyId, productId);
+  return reply.status(201).send(product);
+}
+async function updateSupplierProductController(req, reply) {
+  const user = req.user;
+  const { id } = req.params;
+  const data = updateSupplierProductSchema.parse(req.body);
+  const isAdmin = user.role === "ADMIN";
+  const product = await updateSupplierProductUseCase(id, user.companyId, isAdmin, data);
+  return reply.send(product);
+}
+async function removeSupplierProductController(req, reply) {
+  const user = req.user;
+  const { id } = req.params;
+  const isAdmin = user.role === "ADMIN";
+  await removeSupplierProductUseCase(id, isAdmin, user.companyId);
+  return reply.status(204).send();
+}
+
+// src/http/routes/supplier-products.routes.ts
+async function supplierProductRoutes(app) {
+  app.addHook("preHandler", authenticate);
+  app.get("/supplier/products", { preHandler: [requireRole("SUPPLIER")] }, listMySupplierProductsController);
+  app.put("/supplier/products/:id", { preHandler: [requireRole("SUPPLIER")] }, updateSupplierProductController);
+  app.get("/admin/products", { preHandler: [requireRole("ADMIN")] }, listGlobalProductsController);
+  app.get("/admin/suppliers/:id/products", { preHandler: [requireRole("ADMIN")] }, listSupplierProductsController);
+  app.post("/admin/suppliers/:id/products", { preHandler: [requireRole("ADMIN")] }, addSupplierProductController);
+  app.put("/admin/supplier-products/:id", { preHandler: [requireRole("ADMIN")] }, updateSupplierProductController);
+  app.delete("/admin/supplier-products/:id", { preHandler: [requireRole("ADMIN")] }, removeSupplierProductController);
+}
+
+// src/use-cases/stats.ts
+function getDistanceInKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+async function getSupplierStatsUseCase(supplierCompanyId, month, year) {
+  const startDate = new Date(Number(year), Number(month) - 1, 1);
+  const endDate = new Date(Number(year), Number(month), 1);
+  const proposals = await prisma.supplierProposal.findMany({
+    where: {
+      supplierCompanyId,
+      createdAt: { gte: startDate, lt: endDate }
+    },
+    include: {
+      items: { include: { buyerRequestItem: true } },
+      buyerRequest: {
+        include: {
+          address: true,
+          order: { include: { proposal: { include: { items: true } } } }
+        }
+      }
+    }
+  });
+  const wonOrders = await prisma.order.findMany({
+    where: {
+      supplierCompanyId,
+      createdAt: { gte: startDate, lt: endDate },
+      status: { notIn: ["CANCELLED"] }
+    }
+  });
+  const supplier = await prisma.company.findUnique({
+    where: { id: supplierCompanyId },
+    include: { addresses: true }
+  });
+  const mainAddress = supplier?.addresses.find((a) => a.isMain) || supplier?.addresses[0];
+  let totalFaturado = wonOrders.reduce((acc, order) => acc + order.totalPrice, 0);
+  let leiloesParticipados = proposals.length;
+  let leiloesGanhos = wonOrders.length;
+  let taxaConversao = leiloesParticipados > 0 ? leiloesGanhos / leiloesParticipados * 100 : 0;
+  let ticketMedio = leiloesGanhos > 0 ? totalFaturado / leiloesGanhos : 0;
+  let perdas = 0;
+  let somaDiferencaPreco = 0;
+  let distData = {
+    ate5km: { participados: 0, ganhos: 0 },
+    de5a10km: { participados: 0, ganhos: 0 },
+    mais10km: { participados: 0, ganhos: 0 }
+  };
+  proposals.forEach((prop) => {
+    let dist = -1;
+    if (mainAddress?.latitude && mainAddress?.longitude && prop.buyerRequest.address?.latitude && prop.buyerRequest.address?.longitude) {
+      dist = getDistanceInKm(
+        Number(mainAddress.latitude),
+        Number(mainAddress.longitude),
+        Number(prop.buyerRequest.address.latitude),
+        Number(prop.buyerRequest.address.longitude)
+      );
+    }
+    const wonThis = wonOrders.some((o) => o.buyerRequestId === prop.buyerRequestId);
+    if (dist >= 0) {
+      let bucket = "";
+      if (dist <= 5) bucket = "ate5km";
+      else if (dist <= 10) bucket = "de5a10km";
+      else bucket = "mais10km";
+      distData[bucket].participados++;
+      if (wonThis) distData[bucket].ganhos++;
+    }
+    if (!wonThis) {
+      const winningOrder = prop.buyerRequest.order;
+      if (winningOrder && winningOrder.status !== "CANCELLED") {
+        const myTotal = prop.items.reduce((acc, i) => acc + i.unitPrice * i.buyerRequestItem.quantity, 0) + prop.freightPrice;
+        const diff = myTotal - winningOrder.totalPrice;
+        if (diff > 0) {
+          perdas++;
+          somaDiferencaPreco += diff;
+        }
+      }
+    }
+  });
+  let diferencaMediaPreco = perdas > 0 ? somaDiferencaPreco / perdas : 0;
+  return {
+    overview: {
+      totalFaturado,
+      leiloesParticipados,
+      leiloesGanhos,
+      taxaConversao,
+      ticketMedio
+    },
+    competitiveness: {
+      perdasAnalisadas: perdas,
+      diferencaMediaPreco,
+      distanceAnalysis: [
+        { label: "At\xE9 5km", ...distData.ate5km },
+        { label: "5 a 10km", ...distData.de5a10km },
+        { label: "Mais de 10km", ...distData.mais10km }
+      ]
+    }
+  };
+}
+
+// src/http/routes/stats.routes.ts
+async function statsRoutes(app) {
+  app.addHook("onRequest", authenticate);
+  app.get("/supplier", async (request, reply) => {
+    const { month, year } = request.query;
+    const user = request.user;
+    const companyId = user.companyId;
+    if (!companyId || user.role !== "SUPPLIER") {
+      return reply.status(403).send({ message: "Apenas fornecedores podem ver estat\xEDsticas de fornecedor." });
+    }
+    const d = /* @__PURE__ */ new Date();
+    const m = month || String(d.getMonth() + 1).padStart(2, "0");
+    const y = year || String(d.getFullYear());
+    const stats = await getSupplierStatsUseCase(companyId, m, y);
+    return reply.status(200).send(stats);
+  });
+}
+
 // src/app.ts
 async function buildApp() {
   const app = Fastify({
@@ -1384,6 +1677,8 @@ async function buildApp() {
   await app.register(buyerRequestRoutes);
   await app.register(orderRoutes);
   await app.register(adminRoutes);
+  await app.register(supplierProductRoutes);
+  await app.register(statsRoutes, { prefix: "/stats" });
   app.setErrorHandler((error, req, reply) => {
     if (error instanceof ZodError) {
       return reply.status(422).send({

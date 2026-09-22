@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch --tsconfig tsconfig.json src/server.ts",
     "build": "tsup src/server.ts --format esm",
-    "start": "node dist/server.js",
+    "start": "node dist/server.mjs",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
