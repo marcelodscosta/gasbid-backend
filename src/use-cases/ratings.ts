@@ -1,5 +1,6 @@
 import { prisma } from '../lib/prisma'
 import { AppError, NotFoundError, ForbiddenError } from '../errors/app-error'
+import { sendPushToCompany } from '../services/push-notification'
 
 export async function rateOrderUseCase(
   orderId: string,
@@ -31,14 +32,25 @@ export async function rateOrderUseCase(
     where: { orderId },
   })
 
+  const starsDisplay = '⭐'.repeat(stars)
+
   if (existingRating) {
-    return prisma.supplierRating.update({
+    const result = await prisma.supplierRating.update({
       where: { orderId },
       data: { stars, comment },
     })
+
+    sendPushToCompany(
+      order.supplierCompanyId,
+      `Nova avaliação: ${starsDisplay}`,
+      comment ? `"${comment.substring(0, 80)}"` : `Você recebeu ${stars} estrela${stars > 1 ? 's' : ''}!`,
+      { type: 'RATING_RECEIVED', orderId }
+    )
+
+    return result
   }
 
-  return prisma.supplierRating.create({
+  const result = await prisma.supplierRating.create({
     data: {
       orderId,
       buyerCompanyId,
@@ -47,6 +59,15 @@ export async function rateOrderUseCase(
       comment,
     },
   })
+
+  sendPushToCompany(
+    order.supplierCompanyId,
+    `Nova avaliação: ${starsDisplay}`,
+    comment ? `"${comment.substring(0, 80)}"` : `Você recebeu ${stars} estrela${stars > 1 ? 's' : ''}!`,
+    { type: 'RATING_RECEIVED', orderId }
+  )
+
+  return result
 }
 
 export async function getSupplierRatingSummary(supplierCompanyId: string) {

@@ -1,6 +1,7 @@
 import { prisma } from '../lib/prisma'
 import { NotFoundError, ForbiddenError } from '../errors/app-error'
 import { wsManager } from '../lib/ws'
+import { sendPushToCompany } from '../services/push-notification'
 
 export async function sendMessageUseCase(orderIdOrBuyerRequestId: string, senderId: string, content: string) {
   let order = await prisma.order.findUnique({
@@ -54,6 +55,15 @@ export async function sendMessageUseCase(orderIdOrBuyerRequestId: string, sender
         senderName: user.name
       })
     })
+
+    // Push para o lado oposto
+    const preview = content.length > 50 ? content.substring(0, 50) + '...' : content
+    sendPushToCompany(
+      targetCompanyId,
+      `Nova mensagem de ${user.name} 💬`,
+      preview,
+      { type: 'NEW_ORDER_MESSAGE', orderId: order.id, messageId: message.id }
+    )
   } catch (err) {
     console.error('Error sending WS notification', err)
   }

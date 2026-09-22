@@ -2,6 +2,7 @@ import { prisma } from '../lib/prisma'
 import { NotFoundError, ForbiddenError, AppError } from '../errors/app-error'
 import { wsManager } from '../lib/ws'
 import { calculateDistance } from '../lib/geo'
+import { sendPushToSuppliers } from '../services/push-notification'
 
 interface CreateRequestInput {
   buyerCompanyId: string
@@ -158,6 +159,17 @@ export async function createBuyerRequestUseCase(data: CreateRequestInput) {
     usersToNotify.forEach(user => {
       wsManager.notifyUser(user.id, 'NEW_OPPORTUNITY', { requestId: request.id })
     })
+
+    // Push Notification para fornecedores da região
+    if (companyIds.length > 0) {
+      const itemNames = request.items.map(i => i.product.name).join(', ')
+      sendPushToSuppliers(
+        companyIds,
+        'Nova oportunidade! 🔥',
+        `Pedido de ${itemNames}. Responda agora!`,
+        { type: 'NEW_OPPORTUNITY', requestId: request.id }
+      )
+    }
   } catch (err) {
     console.error('Error sending WS notification to suppliers', err)
   }
@@ -436,6 +448,14 @@ export async function cancelBuyerRequestUseCase(id: string, companyId: string) {
       users.forEach(user => {
         wsManager.notifyUser(user.id, 'OPPORTUNITY_CANCELLED', { requestId: id })
       })
+
+      // Push Notification para fornecedores com propostas
+      sendPushToSuppliers(
+        Array.from(suppliersToNotify),
+        'Oportunidade cancelada',
+        'Uma solicitação em que você enviou proposta foi cancelada pelo comprador.',
+        { type: 'OPPORTUNITY_CANCELLED', requestId: id }
+      )
     }
   } catch (err) {
     console.error('Error sending cancellation WS notification', err)

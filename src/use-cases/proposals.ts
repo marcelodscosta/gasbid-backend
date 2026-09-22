@@ -1,6 +1,7 @@
 import { prisma } from '../lib/prisma'
 import { NotFoundError, ForbiddenError, AppError } from '../errors/app-error'
 import { wsManager } from '../lib/ws'
+import { sendPushToCompany, sendPushToSuppliers } from '../services/push-notification'
 
 interface CreateProposalInput {
   buyerRequestId: string
@@ -135,6 +136,34 @@ export async function createProposalUseCase(data: CreateProposalInput) {
     usersToNotify.forEach(user => {
       wsManager.notifyUser(user.id, 'PROPOSAL_RECEIVED', { buyerRequestId: data.buyerRequestId })
     })
+
+    // Push para o comprador
+    sendPushToCompany(
+      request.buyerCompanyId,
+      'Nova proposta recebida! 📩',
+      `${result.supplierCompany.name} enviou uma proposta de R$ ${newGrandTotal.toFixed(2)}.`,
+      { type: 'PROPOSAL_RECEIVED', buyerRequestId: data.buyerRequestId }
+    )
+
+    // Push para concorrentes superados (outbid)
+    if (competitorProposals.length > 0) {
+      const outbidCompanyIds = competitorProposals
+        .filter(p => {
+          const pItemsTotal = p.items.reduce((s, it) => s + (it.unitPrice * it.buyerRequestItem.quantity), 0)
+          const pGrandTotal = pItemsTotal + p.freightPrice
+          return newGrandTotal < pGrandTotal
+        })
+        .map(p => p.supplierCompanyId)
+
+      if (outbidCompanyIds.length > 0) {
+        sendPushToSuppliers(
+          outbidCompanyIds,
+          'Sua proposta foi superada! ⚠️',
+          'Um concorrente ofereceu um preço menor. Atualize sua proposta para continuar competindo.',
+          { type: 'PROPOSAL_OUTBID', buyerRequestId: data.buyerRequestId }
+        )
+      }
+    }
   } catch (err) {
     console.error('Error sending WS notification', err)
   }
@@ -270,6 +299,25 @@ export async function acceptProposalUseCase(proposalId: string, buyerCompanyId: 
         wsManager.notifyUser(user.id, 'REQUEST_CLOSED', { buyerRequestId: proposal.buyerRequestId, reason: 'O comprador já escolheu uma proposta. Oportunidade finalizada.' })
       }
     })
+
+    // Push para o vencedor
+    sendPushToCompany(
+      order.supplierCompanyId,
+      'Você venceu o leilão! 🎉',
+      `Sua proposta de R$ ${totalPrice.toFixed(2)} foi aceita por ${order.buyerCompany.name}. Confirme o pedido.`,
+      { type: 'ORDER_CREATED', orderId: order.id, buyerRequestId: proposal.buyerRequestId }
+    )
+
+    // Push para os perdedores
+    const loserCompanyIds = competingCompanyIds.filter(id => id !== order.supplierCompanyId)
+    if (loserCompanyIds.length > 0) {
+      sendPushToSuppliers(
+        loserCompanyIds,
+        'Oportunidade finalizada',
+        'O comprador já escolheu outra proposta para esta solicitação.',
+        { type: 'REQUEST_CLOSED', buyerRequestId: proposal.buyerRequestId }
+      )
+    }
   } catch (err) {
     console.error('Error sending WS notification', err)
   }
@@ -301,6 +349,14 @@ export async function rejectProposalUseCase(proposalId: string, buyerCompanyId: 
         buyerRequestId: proposal.buyerRequestId
       })
     })
+
+    // Push para o fornecedor rejeitado
+    sendPushToCompany(
+      proposal.supplierCompanyId,
+      'Proposta não aceita',
+      'Sua proposta não foi selecionada pelo comprador.',
+      { type: 'PROPOSAL_REJECTED', proposalId, buyerRequestId: proposal.buyerRequestId }
+    )
   } catch (err) {
     console.error('Error sending WS notification', err)
   }
@@ -339,6 +395,14 @@ export async function counterProposalUseCase(
         buyerRequestId: proposal.buyerRequestId
       })
     })
+
+    // Push para o fornecedor
+    sendPushToCompany(
+      proposal.supplierCompanyId,
+      'Contra-proposta do comprador 💬',
+      'O comprador respondeu sua proposta com uma sugestão. Confira!',
+      { type: 'COUNTER_OFFER_RECEIVED', proposalId, buyerRequestId: proposal.buyerRequestId }
+    )
   } catch (err) {
     console.error('Error sending WS notification', err)
   }

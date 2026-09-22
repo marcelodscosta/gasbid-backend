@@ -2,6 +2,7 @@ import { prisma } from '../lib/prisma'
 import { NotFoundError, ForbiddenError, AppError } from '../errors/app-error'
 import { OrderStatus } from '@prisma/client'
 import { wsManager } from '../lib/ws'
+import { sendPushToCompany } from '../services/push-notification'
 
 export async function listOrdersUseCase(companyId: string, role: string, page: number, limit: number) {
   const where = role === 'BUYER'
@@ -116,6 +117,40 @@ export async function updateOrderStatusUseCase(
     usersToNotify.forEach(user => {
       wsManager.notifyUser(user.id, 'ORDER_UPDATED', { orderId: id, status })
     })
+
+    // Push Notification contextual por status
+    const pushMessages: Record<string, { target: string; title: string; body: string }> = {
+      'CONFIRMED': {
+        target: order.buyerCompanyId,
+        title: 'Pedido confirmado! ✅',
+        body: 'O fornecedor confirmou seu pedido. Aguarde a entrega.',
+      },
+      'IN_DELIVERY': {
+        target: order.buyerCompanyId,
+        title: 'Pedido a caminho! 🚚',
+        body: 'Seu pedido saiu para entrega. Fique atento!',
+      },
+      'DELIVERED': {
+        target: order.supplierCompanyId,
+        title: 'Entrega confirmada! 📦',
+        body: 'O comprador confirmou o recebimento do pedido.',
+      },
+      'CANCELLED': {
+        target: isBuyer ? order.supplierCompanyId : order.buyerCompanyId,
+        title: 'Pedido cancelado ❌',
+        body: `O pedido foi cancelado.${notes ? ` Motivo: ${notes}` : ''}`,
+      },
+    }
+
+    const pushConfig = pushMessages[status]
+    if (pushConfig) {
+      sendPushToCompany(
+        pushConfig.target,
+        pushConfig.title,
+        pushConfig.body,
+        { type: 'ORDER_UPDATED', orderId: id, status }
+      )
+    }
   } catch (err) {
     console.error('Error sending WS notification', err)
   }

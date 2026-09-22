@@ -9,6 +9,7 @@ import { buyerRequestRoutes } from './http/routes/business.routes'
 import { orderRoutes, adminRoutes } from './http/routes/orders.routes'
 import { supplierProductRoutes } from './http/routes/supplier-products.routes'
 import { statsRoutes } from './http/routes/stats.routes'
+import { pushTokenRoutes } from './http/routes/push-token.routes'
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -76,6 +77,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(adminRoutes)
   await app.register(supplierProductRoutes)
   await app.register(statsRoutes, { prefix: '/stats' })
+  await app.register(pushTokenRoutes)
 
   // Error handler
   app.setErrorHandler((error, req, reply) => {
