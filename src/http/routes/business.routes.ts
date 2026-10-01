@@ -6,6 +6,7 @@ import {
   listBuyerRequestsController,
   getBuyerRequestController,
   cancelBuyerRequestController,
+  updateBuyerRequestStatusController,
   listOpportunitiesController,
   getSupplierMetricsController,
 } from '../controllers/buyer-requests.controller'
@@ -61,6 +62,7 @@ export async function buyerRequestRoutes(app: FastifyInstance) {
   app.get('/buyer-requests', listBuyerRequestsController)
   app.get('/buyer-requests/:id', getBuyerRequestController)
   app.post('/buyer-requests/:id/cancel', cancelBuyerRequestController)
+  app.patch('/buyer-requests/:id/status', updateBuyerRequestStatusController)
 
   // Proposals actions
   app.get('/my-proposals', listSupplierProposalsController)

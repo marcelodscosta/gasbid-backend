@@ -5,6 +5,7 @@ import {
   getBuyerRequestUseCase,
   listOpportunitiesUseCase,
   cancelBuyerRequestUseCase,
+  updateBuyerRequestStatusUseCase,
 } from '../../use-cases/buyer-requests'
 import { getSupplierMetricsUseCase } from '../../use-cases/supplier-metrics'
 import { createBuyerRequestSchema, paginationSchema } from '../../schemas/index'
@@ -36,6 +37,14 @@ export async function cancelBuyerRequestController(req: FastifyRequest, reply: F
   const user = req.user as JWTUser
   const { id } = req.params as { id: string }
   const result = await cancelBuyerRequestUseCase(id, user.companyId)
+  return reply.status(200).send(result)
+}
+
+export async function updateBuyerRequestStatusController(req: FastifyRequest, reply: FastifyReply) {
+  const user = req.user as JWTUser
+  const { id } = req.params as { id: string }
+  const { status } = req.body as { status: string }
+  const result = await updateBuyerRequestStatusUseCase(id, user.companyId, status)
   return reply.status(200).send(result)
 }
 

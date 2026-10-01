@@ -463,3 +463,19 @@ export async function cancelBuyerRequestUseCase(id: string, companyId: string) {
 
   return updatedRequest
 }
+
+export async function updateBuyerRequestStatusUseCase(id: string, companyId: string, status: string) {
+  const request = await prisma.buyerRequest.findUnique({
+    where: { id },
+  })
+
+  if (!request) throw new NotFoundError('Solicitação')
+  if (request.buyerCompanyId !== companyId) throw new ForbiddenError()
+
+  const updatedRequest = await prisma.buyerRequest.update({
+    where: { id },
+    data: { status: status as any },
+  })
+
+  return updatedRequest
+}
