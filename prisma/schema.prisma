@@ -121,8 +121,10 @@ model BuyerRequest {
   deadline       DateTime
   expiresAt      DateTime           @map("expires_at")
   observations   String?
-  status         BuyerRequestStatus @default(DRAFT)
-  createdAt      DateTime           @default(now()) @map("created_at")
+  status             BuyerRequestStatus @default(DRAFT)
+  autoAcceptMode     AutoAcceptMode     @default(NONE) @map("auto_accept_mode")
+  counterOfferRounds Int                @default(0) @map("counter_offer_rounds")
+  createdAt          DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
   address        Address            @relation(fields: [addressId], references: [id])
   buyerCompany   Company            @relation(fields: [buyerCompanyId], references: [id])
@@ -295,6 +297,13 @@ enum BiddingMode {
   BOTH
 }
 
+enum AutoAcceptMode {
+  NONE
+  PRICE
+  TIME
+  RATING
+}
+
 enum BuyerRequestStatus {
   DRAFT
   OPEN
@@ -314,6 +323,7 @@ enum ProposalStatus {
 }
 
 enum OrderStatus {
+  PENDING_CONFIRMATION
   CREATED
   CONFIRMED
   IN_DELIVERY

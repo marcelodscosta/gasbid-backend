@@ -24,14 +24,6 @@ export async function createProposalUseCase(data: CreateProposalInput) {
   if (request.status !== 'OPEN') throw new AppError('Solicitação não está aberta para propostas')
   if (request.expiresAt < new Date()) throw new AppError('Prazo para envio de propostas encerrado')
 
-  // Calculate total price of this new/updated proposal
-  const requestItems = await prisma.buyerRequestItem.findMany({ where: { buyerRequestId: data.buyerRequestId } })
-  const newItemsTotal = items.reduce((sum, item) => {
-    const rItem = requestItems.find(ri => ri.id === item.buyerRequestItemId)
-    return sum + (item.unitPrice * (rItem?.quantity || 1))
-  }, 0)
-  const newGrandTotal = newItemsTotal + (data.freightPrice || 0)
-
   const existingProposal = await prisma.supplierProposal.findUnique({
     where: {
       buyerRequestId_supplierCompanyId: {
@@ -41,8 +33,19 @@ export async function createProposalUseCase(data: CreateProposalInput) {
     },
   })
 
-  // Fetch all active proposals EXCLUDING the current supplier's own proposal
-  // to get the true lowest competitor price
+  const isCounterOffer = existingProposal?.status === 'COUNTER_OFFER'
+  if (new Date(data.deliveryDeadline) > request.deadline && !isCounterOffer) {
+    throw new AppError(`O prazo de entrega informado ultrapassa o limite exigido pelo comprador (${request.deadline.toLocaleString('pt-BR')}). Se precisar de mais prazo, negocie via contraproposta.`)
+  }
+
+  // Calculate total price of this new/updated proposal
+  const requestItems = await prisma.buyerRequestItem.findMany({ where: { buyerRequestId: data.buyerRequestId } })
+  const newItemsTotal = items.reduce((sum, item) => {
+    const rItem = requestItems.find(ri => ri.id === item.buyerRequestItemId)
+    return sum + (item.unitPrice * (rItem?.quantity || 1))
+  }, 0)
+  const newGrandTotal = newItemsTotal + (data.freightPrice || 0)
+
   const competitorProposals = await prisma.supplierProposal.findMany({
     where: {
       buyerRequestId: data.buyerRequestId,
@@ -260,9 +263,9 @@ export async function acceptProposalUseCase(proposalId: string, buyerCompanyId: 
         buyerCompanyId: proposal.buyerRequest.buyerCompanyId,
         supplierCompanyId: proposal.supplierCompanyId,
         totalPrice,
-        status: 'CREATED',
+        status: 'PENDING_CONFIRMATION',
         timeline: {
-          create: { status: 'CREATED', notes: 'Pedido criado após aceite da proposta' },
+          create: { status: 'PENDING_CONFIRMATION', notes: 'Pedido criado. Aguardando aceite de despacho do fornecedor.' },
         },
       },
       include: {

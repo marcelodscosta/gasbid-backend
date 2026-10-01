@@ -54,6 +54,7 @@ export async function getOrderUseCase(id: string, companyId: string) {
 }
 
 const VALID_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+  PENDING_CONFIRMATION: ['CONFIRMED', 'CANCELLED'],
   CREATED: ['CONFIRMED', 'IN_DELIVERY', 'DELIVERED', 'CANCELLED'],
   CONFIRMED: ['IN_DELIVERY', 'DELIVERED', 'CANCELLED'],
   IN_DELIVERY: ['DELIVERED', 'CANCELLED'],
