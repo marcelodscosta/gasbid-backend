@@ -1,8 +1,10 @@
+import { invalidateTrackingCache } from './tracking'
 import { prisma } from '../lib/prisma'
 import { NotFoundError, ForbiddenError, AppError } from '../errors/app-error'
 import { OrderStatus } from '@prisma/client'
 import { wsManager } from '../lib/ws'
 import { sendPushToCompany } from '../services/push-notification'
+import { ACCEPTABLE_PROPOSAL_STATUSES, ORDER_TRANSITIONS, canTransition } from '../lib/state-machine'
 
 export async function listOrdersUseCase(companyId: string, role: string, page: number, limit: number) {
   const where = role === 'BUYER'
@@ -53,15 +55,6 @@ export async function getOrderUseCase(id: string, companyId: string) {
   return order
 }
 
-const VALID_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  PENDING_CONFIRMATION: ['CONFIRMED', 'CANCELLED'],
-  CREATED: ['CONFIRMED', 'IN_DELIVERY', 'DELIVERED', 'CANCELLED'],
-  CONFIRMED: ['IN_DELIVERY', 'DELIVERED', 'CANCELLED'],
-  IN_DELIVERY: ['DELIVERED', 'CANCELLED'],
-  DELIVERED: [],
-  CANCELLED: [],
-}
-
 export async function updateOrderStatusUseCase(
   id: string,
   companyId: string,
@@ -80,10 +73,7 @@ export async function updateOrderStatusUseCase(
     throw new ForbiddenError()
   }
 
-  const allowed = VALID_TRANSITIONS[order.status]
-  console.log(`[DEBUG] Updating order ${id} from ${order.status} to ${status}. Allowed: ${allowed}`)
-  
-  if (!allowed.includes(status)) {
+  if (!canTransition(ORDER_TRANSITIONS, order.status, status)) {
     throw new AppError(`Transição de ${order.status} → ${status} não permitida`)
   }
 
@@ -102,22 +92,34 @@ export async function updateOrderStatusUseCase(
   if (status === 'CONFIRMED') data.confirmedAt = new Date()
   if (status === 'DELIVERED') data.deliveredAt = new Date()
 
-  const [updated] = await prisma.$transaction([
-    prisma.order.update({ where: { id }, data }),
-    prisma.orderTimeline.create({ data: { orderId: id, status, notes } }),
-  ])
+  // Claim condicional: só aplica se o pedido ainda estiver no status lido
+  // (evita, p.ex., confirmar um pedido que o cron acabou de cancelar).
+  const updated = await prisma.$transaction(async tx => {
+    const claimed = await tx.order.updateMany({ where: { id, status: order.status }, data })
+    if (claimed.count === 0) {
+      throw new AppError('O pedido foi alterado por outra ação. Atualize a tela e tente novamente.')
+    }
+    await tx.orderTimeline.create({ data: { orderId: id, status, notes } })
 
-  // WebSocket Notification
+    // Fornecedor confirmou: as demais propostas da cotação deixam de ser alternativa
+    if (status === 'CONFIRMED') {
+      await tx.supplierProposal.updateMany({
+        where: {
+          buyerRequestId: order.buyerRequestId,
+          id: { not: order.proposalId },
+          status: { in: [...ACCEPTABLE_PROPOSAL_STATUSES] },
+        },
+        data: { status: 'REJECTED' },
+      })
+    }
+    return tx.order.findUniqueOrThrow({ where: { id } })
+  })
+
+  invalidateTrackingCache(order.supplierCompanyId)
+
+  // Notificações (nunca derrubam a requisição)
   try {
-    const usersToNotify = await prisma.user.findMany({
-      where: { companyId: { in: [order.buyerCompanyId, order.supplierCompanyId] } },
-      select: { id: true }
-    })
-    
-    console.log(`[WS] Notifying ${usersToNotify.length} users about ORDER_UPDATED`)
-    usersToNotify.forEach(user => {
-      wsManager.notifyUser(user.id, 'ORDER_UPDATED', { orderId: id, status })
-    })
+    wsManager.notifyCompanies([order.buyerCompanyId, order.supplierCompanyId], 'ORDER_UPDATED', { orderId: id, status })
 
     // Push Notification contextual por status
     const pushMessages: Record<string, { target: string; title: string; body: string }> = {

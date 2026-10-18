@@ -1,4 +1,5 @@
 import { prisma } from '../lib/prisma'
+import { toNum, proposalTotal } from '../lib/money'
 
 function getDistanceInKm(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371
@@ -49,7 +50,7 @@ export async function getSupplierStatsUseCase(supplierCompanyId: string, month: 
 
   const mainAddress = supplier?.addresses.find(a => a.isMain) || supplier?.addresses[0]
 
-  let totalFaturado = wonOrders.reduce((acc, order) => acc + order.totalPrice, 0)
+  let totalFaturado = wonOrders.reduce((acc, order) => acc + toNum(order.totalPrice), 0)
   let leiloesParticipados = proposals.length
   let leiloesGanhos = wonOrders.length
   let taxaConversao = leiloesParticipados > 0 ? (leiloesGanhos / leiloesParticipados) * 100 : 0
@@ -91,8 +92,8 @@ export async function getSupplierStatsUseCase(supplierCompanyId: string, month: 
       const winningOrder = (prop.buyerRequest as any).order
       if (winningOrder && winningOrder.status !== 'CANCELLED') {
         // Calcular o valor total da nossa proposta
-        const myTotal = prop.items.reduce((acc, i) => acc + (i.unitPrice * i.buyerRequestItem.quantity), 0) + prop.freightPrice
-        const diff = myTotal - winningOrder.totalPrice
+        const myTotal = proposalTotal(prop.items, prop.freightPrice)
+        const diff = myTotal - toNum(winningOrder.totalPrice)
         if (diff > 0) {
           perdas++
           somaDiferencaPreco += diff

@@ -2,6 +2,8 @@ import { prisma } from '../lib/prisma'
 import { NotFoundError, ForbiddenError, AppError } from '../errors/app-error'
 import { wsManager } from '../lib/ws'
 import { sendPushToCompany, sendPushToSuppliers } from '../services/push-notification'
+import { proposalTotal, round2 } from '../lib/money'
+import { ACCEPTABLE_PROPOSAL_STATUSES, ACCEPTING_STATUSES, MIN_BID_DECREMENT } from '../lib/state-machine'
 
 interface CreateProposalInput {
   buyerRequestId: string
@@ -16,162 +18,164 @@ interface CreateProposalInput {
   observations?: string
 }
 
+/**
+ * Cria ou atualiza o lance de um fornecedor.
+ *
+ * Regra única (proposta nova ou atualização): havendo concorrente, o novo total precisa
+ * ser ao menos MIN_BID_DECREMENT menor que a menor oferta rival — exceto quando o fornecedor
+ * já lidera (pode ajustar livremente) ou está respondendo a uma contraproposta.
+ *
+ * A solicitação é travada (SELECT ... FOR UPDATE) durante a validação+gravação, então
+ * lances simultâneos são serializados e não há corrida entre "ler concorrentes" e "gravar".
+ */
 export async function createProposalUseCase(data: CreateProposalInput) {
   const { items, ...proposalData } = data
 
-  const request = await prisma.buyerRequest.findUnique({ where: { id: data.buyerRequestId } })
-  if (!request) throw new NotFoundError('Solicitação')
-  if (request.status !== 'OPEN') throw new AppError('Solicitação não está aberta para propostas')
-  if (request.expiresAt < new Date()) throw new AppError('Prazo para envio de propostas encerrado')
+  const outcome = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT "id" FROM "buyer_requests" WHERE "id" = ${data.buyerRequestId} FOR UPDATE`
 
-  const existingProposal = await prisma.supplierProposal.findUnique({
-    where: {
-      buyerRequestId_supplierCompanyId: {
-        buyerRequestId: data.buyerRequestId,
-        supplierCompanyId: data.supplierCompanyId,
-      },
-    },
-  })
+    const request = await tx.buyerRequest.findUnique({
+      where: { id: data.buyerRequestId },
+      include: { items: true },
+    })
+    if (!request) throw new NotFoundError('Solicitação')
+    if (request.status !== 'OPEN') throw new AppError('Solicitação não está aberta para propostas')
+    if (request.expiresAt < new Date()) throw new AppError('Prazo para envio de propostas encerrado')
 
-  const isCounterOffer = existingProposal?.status === 'COUNTER_OFFER'
-  if (new Date(data.deliveryDeadline) > request.deadline && !isCounterOffer) {
-    throw new AppError(`O prazo de entrega informado ultrapassa o limite exigido pelo comprador (${request.deadline.toLocaleString('pt-BR')}). Se precisar de mais prazo, negocie via contraproposta.`)
-  }
-
-  // Calculate total price of this new/updated proposal
-  const requestItems = await prisma.buyerRequestItem.findMany({ where: { buyerRequestId: data.buyerRequestId } })
-  const newItemsTotal = items.reduce((sum, item) => {
-    const rItem = requestItems.find(ri => ri.id === item.buyerRequestItemId)
-    return sum + (item.unitPrice * (rItem?.quantity || 1))
-  }, 0)
-  const newGrandTotal = newItemsTotal + (data.freightPrice || 0)
-
-  const competitorProposals = await prisma.supplierProposal.findMany({
-    where: {
-      buyerRequestId: data.buyerRequestId,
-      status: { notIn: ['WITHDRAWN', 'REJECTED'] },
-      supplierCompanyId: { not: data.supplierCompanyId },
-    },
-    include: { items: { include: { buyerRequestItem: true } } }
-  })
-
-  let currentLowestTotal = Infinity
-  competitorProposals.forEach(p => {
-    const pItemsTotal = p.items.reduce((s, it) => s + (it.unitPrice * it.buyerRequestItem.quantity), 0)
-    const pGrandTotal = pItemsTotal + p.freightPrice
-    if (pGrandTotal < currentLowestTotal) {
-      currentLowestTotal = pGrandTotal
+    const requestItemIds = new Set(request.items.map(i => i.id))
+    const sentIds = items.map(i => i.buyerRequestItemId)
+    if (new Set(sentIds).size !== sentIds.length || sentIds.some(id => !requestItemIds.has(id))) {
+      throw new AppError('Itens da proposta inválidos para esta solicitação')
     }
-  })
-
-  if (existingProposal) {
-    const isCounterOffer = existingProposal.status === 'COUNTER_OFFER'
-
-    // If there's no competitor lower than us, we are already winning — allow any update
-    if (!isCounterOffer && currentLowestTotal < Infinity) {
-      // Calculate current proposal's grand total
-      const myCurrentItems = await prisma.supplierProposalItem.findMany({
-        where: { supplierProposalId: existingProposal.id },
-        include: { buyerRequestItem: true }
-      })
-      const myCurrentTotal = myCurrentItems.reduce((s, it) => s + (it.unitPrice * it.buyerRequestItem.quantity), 0) + existingProposal.freightPrice
-
-      const isLosing = currentLowestTotal < myCurrentTotal
-
-      if (isLosing) {
-        // If rebidding, new total must be at least R$ 2,00 lower than the competitor's lowest
-        const isRebiddingToWin = newGrandTotal <= currentLowestTotal - 2
-        if (!isRebiddingToWin) {
-          throw new AppError(`Para cobrir a menor oferta atual (R$ ${currentLowestTotal.toFixed(2)}), sua nova proposta precisa ser de no máximo R$ ${(currentLowestTotal - 2).toFixed(2)} (diferença mínima de R$ 2,00).`)
-        }
-      }
-      // If not losing (already winning), allow any update freely
+    if (sentIds.length !== requestItemIds.size) {
+      throw new AppError('A proposta precisa informar o preço de todos os itens da solicitação')
     }
 
-    return prisma.supplierProposal.update({
-      where: { id: existingProposal.id },
-      data: {
-        freightPrice: data.freightPrice,
-        deliveryDeadline: new Date(data.deliveryDeadline),
-        paymentTerms: data.paymentTerms,
-        observations: data.observations,
-        status: 'UPDATED',
-        items: {
-          deleteMany: {},
-          create: items.map(item => ({
-            buyerRequestItemId: item.buyerRequestItemId,
-            unitPrice: item.unitPrice,
-          }))
-        }
+    const existing = await tx.supplierProposal.findUnique({
+      where: {
+        buyerRequestId_supplierCompanyId: {
+          buyerRequestId: data.buyerRequestId,
+          supplierCompanyId: data.supplierCompanyId,
+        },
       },
-      include: {
-        supplierCompany: { select: { id: true, name: true } },
-        items: true,
-      },
-    })
-  }
-
-
-  const result = await prisma.supplierProposal.create({
-    data: {
-      ...proposalData,
-      deliveryDeadline: new Date(data.deliveryDeadline),
-      status: 'SUBMITTED',
-      items: {
-        create: items.map(item => ({
-          buyerRequestItemId: item.buyerRequestItemId,
-          unitPrice: item.unitPrice,
-        }))
-      }
-    },
-    include: {
-      supplierCompany: { select: { id: true, name: true } },
-      items: true,
-    },
-  })
-
-  // WebSocket Notification for the Buyer
-  try {
-    const usersToNotify = await prisma.user.findMany({
-      where: { companyId: request.buyerCompanyId },
-      select: { id: true }
-    })
-    usersToNotify.forEach(user => {
-      wsManager.notifyUser(user.id, 'PROPOSAL_RECEIVED', { buyerRequestId: data.buyerRequestId })
+      include: { items: { include: { buyerRequestItem: true } } },
     })
 
-    // Push para o comprador
-    sendPushToCompany(
-      request.buyerCompanyId,
-      'Nova proposta recebida! 📩',
-      `${result.supplierCompany.name} enviou uma proposta de R$ ${newGrandTotal.toFixed(2)}.`,
-      { type: 'PROPOSAL_RECEIVED', buyerRequestId: data.buyerRequestId }
+    const isCounterOffer = existing?.status === 'COUNTER_OFFER'
+    if (new Date(data.deliveryDeadline) > request.deadline && !isCounterOffer) {
+      throw new AppError(
+        `O prazo de entrega informado ultrapassa o limite exigido pelo comprador (${request.deadline.toLocaleString('pt-BR')}). Se precisar de mais prazo, negocie via contraproposta.`,
+      )
+    }
+
+    const newGrandTotal = proposalTotal(
+      items.map(item => ({
+        unitPrice: item.unitPrice,
+        quantity: request.items.find(ri => ri.id === item.buyerRequestItemId)?.quantity,
+      })),
+      data.freightPrice || 0,
     )
 
-    // Push para concorrentes superados (outbid)
-    if (competitorProposals.length > 0) {
-      const outbidCompanyIds = competitorProposals
-        .filter(p => {
-          const pItemsTotal = p.items.reduce((s, it) => s + (it.unitPrice * it.buyerRequestItem.quantity), 0)
-          const pGrandTotal = pItemsTotal + p.freightPrice
-          return newGrandTotal < pGrandTotal
-        })
-        .map(p => p.supplierCompanyId)
+    const competitors = await tx.supplierProposal.findMany({
+      where: {
+        buyerRequestId: data.buyerRequestId,
+        status: { notIn: ['WITHDRAWN', 'REJECTED'] },
+        supplierCompanyId: { not: data.supplierCompanyId },
+      },
+      include: { items: { include: { buyerRequestItem: true } } },
+    })
+    const competitorTotals = competitors.map(p => ({
+      supplierCompanyId: p.supplierCompanyId,
+      total: proposalTotal(p.items, p.freightPrice),
+    }))
+    const lowestOther = competitorTotals.length ? Math.min(...competitorTotals.map(c => c.total)) : Infinity
 
-      if (outbidCompanyIds.length > 0) {
-        sendPushToSuppliers(
-          outbidCompanyIds,
-          'Sua proposta foi superada! ⚠️',
-          'Um concorrente ofereceu um preço menor. Atualize sua proposta para continuar competindo.',
-          { type: 'PROPOSAL_OUTBID', buyerRequestId: data.buyerRequestId }
-        )
+    if (!isCounterOffer && lowestOther < Infinity) {
+      const isActive = !!existing && !['WITHDRAWN', 'REJECTED'].includes(existing.status)
+      const alreadyLeading = isActive && proposalTotal(existing!.items, existing!.freightPrice) < lowestOther
+      if (!alreadyLeading) {
+        const maxAllowed = round2(lowestOther - MIN_BID_DECREMENT)
+        if (newGrandTotal > maxAllowed) {
+          throw new AppError(
+            `Para cobrir a menor oferta atual (R$ ${lowestOther.toFixed(2)}), sua proposta precisa ser de no máximo R$ ${maxAllowed.toFixed(2)} (diferença mínima de R$ ${MIN_BID_DECREMENT.toFixed(2).replace('.', ',')}).`,
+          )
+        }
       }
     }
-  } catch (err) {
-    console.error('Error sending WS notification', err)
-  }
 
-  return result
+    const include = {
+      supplierCompany: { select: { id: true, name: true } },
+      items: true,
+    }
+    const itemsData = items.map(item => ({
+      buyerRequestItemId: item.buyerRequestItemId,
+      unitPrice: item.unitPrice,
+    }))
+
+    const proposal = existing
+      ? await tx.supplierProposal.update({
+          where: { id: existing.id },
+          data: {
+            freightPrice: data.freightPrice,
+            deliveryDeadline: new Date(data.deliveryDeadline),
+            paymentTerms: data.paymentTerms,
+            observations: data.observations,
+            status: 'UPDATED',
+            items: { deleteMany: {}, create: itemsData },
+          },
+          include,
+        })
+      : await tx.supplierProposal.create({
+          data: {
+            ...proposalData,
+            deliveryDeadline: new Date(data.deliveryDeadline),
+            status: 'SUBMITTED',
+            items: { create: itemsData },
+          },
+          include,
+        })
+
+    return { proposal, request, competitorTotals, newGrandTotal, isUpdate: !!existing }
+  })
+
+  notifyBidActivity(data.buyerRequestId, outcome)
+  return outcome.proposal
+}
+
+/** Avisa comprador e concorrentes superados (criação OU atualização). Nunca derruba o lance. */
+function notifyBidActivity(
+  buyerRequestId: string,
+  o: {
+    proposal: { supplierCompany: { name: string } }
+    request: { buyerCompanyId: string }
+    competitorTotals: { supplierCompanyId: string; total: number }[]
+    newGrandTotal: number
+    isUpdate: boolean
+  },
+) {
+  try {
+    const event = o.isUpdate ? 'PROPOSAL_UPDATED' : 'PROPOSAL_RECEIVED'
+    wsManager.notifyCompany(o.request.buyerCompanyId, event, { buyerRequestId })
+    sendPushToCompany(
+      o.request.buyerCompanyId,
+      o.isUpdate ? 'Proposta atualizada! 🔄' : 'Nova proposta recebida! 📩',
+      `${o.proposal.supplierCompany.name} ${o.isUpdate ? 'atualizou a proposta para' : 'enviou uma proposta de'} R$ ${o.newGrandTotal.toFixed(2)}.`,
+      { type: event, buyerRequestId },
+    )
+
+    const outbid = o.competitorTotals.filter(c => o.newGrandTotal < c.total).map(c => c.supplierCompanyId)
+    if (outbid.length > 0) {
+      wsManager.notifyCompanies(outbid, 'PROPOSAL_OUTBID', { buyerRequestId })
+      sendPushToSuppliers(
+        outbid,
+        'Sua proposta foi superada! ⚠️',
+        'Um concorrente ofereceu um preço menor. Atualize sua proposta para continuar competindo.',
+        { type: 'PROPOSAL_OUTBID', buyerRequestId },
+      )
+    }
+  } catch (err) {
+    console.error('Error sending bid notifications', err)
+  }
 }
 
 export async function listProposalsUseCase(buyerRequestId: string, buyerCompanyId: string) {
@@ -190,7 +194,8 @@ export async function listProposalsUseCase(buyerRequestId: string, buyerCompanyI
           id: true, 
           name: true, 
           cnpj: true,
-          ratingsReceived: { select: { stars: true } }
+          ratingAvg: true,
+          ratingCount: true,
         } 
       },
       items: { include: { buyerRequestItem: { include: { product: true } } } }
@@ -219,44 +224,80 @@ export async function listSupplierProposalsUseCase(supplierCompanyId: string) {
 export async function acceptProposalUseCase(proposalId: string, buyerCompanyId: string) {
   const proposal = await prisma.supplierProposal.findUnique({
     where: { id: proposalId },
-    include: { 
+    include: {
       buyerRequest: { include: { items: true } },
       items: true
     },
   })
   if (!proposal) throw new NotFoundError('Proposta')
   if (proposal.buyerRequest.buyerCompanyId !== buyerCompanyId) throw new ForbiddenError()
-  if (proposal.buyerRequest.status !== 'OPEN') {
+  // Aceita também UNDER_REVIEW: é o estado após "Finalizar busca" e após o fornecedor não confirmar
+  if (!ACCEPTING_STATUSES.includes(proposal.buyerRequest.status)) {
     throw new AppError('Solicitação não está mais aberta')
   }
+  if (!(ACCEPTABLE_PROPOSAL_STATUSES as readonly string[]).includes(proposal.status)) {
+    throw new AppError('Esta proposta não está mais disponível para aceite')
+  }
 
-  // Calculate total price based on items
-  let itemsTotal = 0
-  proposal.items.forEach(pItem => {
-    const rItem = proposal.buyerRequest.items.find(i => i.id === pItem.buyerRequestItemId)
-    if (rItem) {
-      itemsTotal += pItem.unitPrice * rItem.quantity
-    }
-  })
-  const totalPrice = itemsTotal + proposal.freightPrice
+  const totalPrice = proposalTotal(
+    proposal.items.map(pItem => ({
+      unitPrice: pItem.unitPrice,
+      quantity: proposal.buyerRequest.items.find(i => i.id === pItem.buyerRequestItemId)?.quantity ?? 0,
+    })),
+    proposal.freightPrice,
+  )
 
-  const [, , , order] = await prisma.$transaction([
-    prisma.supplierProposal.update({
-      where: { id: proposalId },
-      data: { status: 'ACCEPTED' },
-    }),
-    prisma.supplierProposal.updateMany({
-      where: {
-        buyerRequestId: proposal.buyerRequestId,
-        id: { not: proposalId },
-      },
-      data: { status: 'REJECTED' },
-    }),
-    prisma.buyerRequest.update({
-      where: { id: proposal.buyerRequestId },
+  const orderInclude = {
+    buyerRequest: { include: { items: { include: { product: true } } } },
+    proposal: { include: { items: true } },
+    buyerCompany: { select: { id: true, name: true } },
+    supplierCompany: { select: { id: true, name: true } },
+  }
+
+  // Claims atômicos: só prossegue se a solicitação e a proposta ainda estiverem disponíveis
+  // (evita pedidos duplicados em aceites concorrentes). As demais propostas NÃO são rejeitadas
+  // aqui: se o fornecedor não confirmar, o comprador ainda pode escolher outra (ver cron/orders).
+  const order = await prisma.$transaction(async tx => {
+    const claimed = await tx.buyerRequest.updateMany({
+      where: { id: proposal.buyerRequestId, status: { in: ACCEPTING_STATUSES } },
       data: { status: 'AWARDED' },
-    }),
-    prisma.order.create({
+    })
+    if (claimed.count === 0) throw new AppError('Solicitação não está mais aberta')
+
+    const accepted = await tx.supplierProposal.updateMany({
+      where: { id: proposalId, status: { in: [...ACCEPTABLE_PROPOSAL_STATUSES] } },
+      data: { status: 'ACCEPTED' },
+    })
+    if (accepted.count === 0) throw new AppError('Esta proposta não está mais disponível para aceite')
+
+    // Order.buyerRequestId é único: após cancelamento por falta de confirmação, o pedido é reaproveitado
+    const previous = await tx.order.findUnique({
+      where: { buyerRequestId: proposal.buyerRequestId },
+      select: { id: true, status: true },
+    })
+    if (previous) {
+      if (previous.status !== 'CANCELLED') throw new AppError('Já existe um pedido ativo para esta solicitação')
+      // A conversa anterior era com outro fornecedor (pedido nunca confirmado)
+      await tx.orderMessage.deleteMany({ where: { orderId: previous.id } })
+      return tx.order.update({
+        where: { id: previous.id },
+        data: {
+          proposalId,
+          supplierCompanyId: proposal.supplierCompanyId,
+          totalPrice,
+          status: 'PENDING_CONFIRMATION',
+          confirmedAt: null,
+          deliveredAt: null,
+          createdAt: new Date(), // reinicia a janela de 5 min de confirmação
+          timeline: {
+            create: { status: 'PENDING_CONFIRMATION', notes: 'Novo fornecedor selecionado. Aguardando aceite de despacho.' },
+          },
+        },
+        include: orderInclude,
+      })
+    }
+
+    return tx.order.create({
       data: {
         buyerRequestId: proposal.buyerRequestId,
         proposalId,
@@ -268,14 +309,9 @@ export async function acceptProposalUseCase(proposalId: string, buyerCompanyId: 
           create: { status: 'PENDING_CONFIRMATION', notes: 'Pedido criado. Aguardando aceite de despacho do fornecedor.' },
         },
       },
-      include: {
-        buyerRequest: { include: { items: { include: { product: true } } } },
-        proposal: { include: { items: true } },
-        buyerCompany: { select: { id: true, name: true } },
-        supplierCompany: { select: { id: true, name: true } },
-      },
-    }),
-  ])
+      include: orderInclude,
+    })
+  })
 
   try {
     // Notify all suppliers who competed or had proposals for this request that it's closed/awarded

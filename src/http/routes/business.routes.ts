@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { prisma } from '../../lib/prisma'
 import { authenticate } from '../middlewares/auth'
+import { ForbiddenError } from '../../errors/app-error'
 import {
   createBuyerRequestController,
   listBuyerRequestsController,
@@ -44,16 +45,24 @@ export async function buyerRequestRoutes(app: FastifyInstance) {
   app.addHook('preHandler', authenticate)
 
   // Companies / Addresses
+  // Somente a própria empresa (ou admin) lê/cria endereços — evita acesso a dados de outras empresas
+  const assertCompanyAccess = (req: any) => {
+    const { companyId } = req.params as { companyId: string }
+    const user = req.user as { role: string; companyId: string }
+    if (user.role !== 'ADMIN' && user.companyId !== companyId) throw new ForbiddenError()
+    return companyId
+  }
+
   app.post('/companies/:companyId/addresses', async (req, reply) => {
     const { createAddressSchema } = await import('../../schemas/index.js')
-    const { companyId } = req.params as { companyId: string }
+    const companyId = assertCompanyAccess(req)
     const data = createAddressSchema.parse(req.body)
     const address = await prisma.address.create({ data: { ...data, companyId } })
     return reply.status(201).send(address)
   })
 
   app.get('/companies/:companyId/addresses', async (req) => {
-    const { companyId } = req.params as { companyId: string }
+    const companyId = assertCompanyAccess(req)
     return prisma.address.findMany({ where: { companyId }, orderBy: { isMain: 'desc' } })
   })
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createBuyerRequestUseCase, listBuyerRequestsUseCase } from './buyer-requests'
 import { prisma } from '../lib/prisma'
+import { wsManager } from '../lib/ws'
 import { NotFoundError } from '../errors/app-error'
 
 vi.mock('../lib/prisma', () => ({
@@ -16,6 +17,7 @@ vi.mock('../lib/prisma', () => ({
     },
     buyerRequest: {
       create: vi.fn(),
+      findFirst: vi.fn().mockResolvedValue(null),
       findMany: vi.fn(),
       count: vi.fn(),
     },
@@ -29,9 +31,18 @@ vi.mock('../lib/prisma', () => ({
 }))
 
 vi.mock('../lib/ws', () => ({
+  regionKey: (city: string, state: string) => `${city}|${state}`,
   wsManager: {
     notifyUser: vi.fn(),
+    notifyCompany: vi.fn(),
+    notifyCompanies: vi.fn(),
+    broadcast: vi.fn(),
   }
+}))
+
+vi.mock('../services/push-notification', () => ({
+  sendPushToSuppliers: vi.fn(),
+  sendPushToCompany: vi.fn(),
 }))
 
 describe('BuyerRequests Use Cases', () => {
@@ -44,8 +55,7 @@ describe('BuyerRequests Use Cases', () => {
       buyerCompanyId: 'buyer-1',
       addressId: 'addr-1',
       items: [{ productId: 'prod-1', quantity: 10 }],
-      deadline: '2026-05-10T10:00:00Z',
-      expiresAt: '2026-05-05T10:00:00Z',
+      deadline: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     }
 
     it('deve retornar NotFoundError se o endereço não pertencer à empresa', async () => {
@@ -56,7 +66,11 @@ describe('BuyerRequests Use Cases', () => {
 
     it('deve criar uma solicitação com sucesso e notificar fornecedores', async () => {
       vi.mocked(prisma.address.findFirst).mockResolvedValue({ id: 'addr-1', city: 'São Paulo', state: 'SP' } as any)
-      vi.mocked(prisma.buyerRequest.create).mockResolvedValue({ id: 'req-1', ...input } as any)
+      vi.mocked(prisma.buyerRequest.create).mockResolvedValue({
+        id: 'req-1',
+        ...input,
+        items: [{ id: 'item-1', productId: 'prod-1', quantity: 10, product: { name: 'GLP P13' } }],
+      } as any)
       vi.mocked(prisma.supplierCoverage.findMany).mockResolvedValue([{ supplierCompanyId: 'supp-1' }] as any)
       vi.mocked(prisma.user.findMany).mockResolvedValue([{ id: 'user-supp-1' }] as any)
 
@@ -64,9 +78,7 @@ describe('BuyerRequests Use Cases', () => {
 
       expect(result.id).toBe('req-1')
       expect(prisma.buyerRequest.create).toHaveBeenCalled()
-      expect(prisma.user.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: { companyId: { in: ['supp-1'] }, role: 'SUPPLIER' }
-      }))
+      expect(wsManager.notifyCompanies).toHaveBeenCalledWith(['supp-1'], 'NEW_OPPORTUNITY', expect.anything())
     })
   })
 

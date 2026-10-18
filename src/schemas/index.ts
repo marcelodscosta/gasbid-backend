@@ -31,6 +31,7 @@ export const createBuyerRequestSchema = z.object({
   deadline: z.string().datetime(),
   expiresAt: z.string().datetime().optional(),
   observations: z.string().optional(),
+  paymentMethod: z.enum(['PIX', 'CASH', 'CREDIT', 'DEBIT', 'BOLETO']).optional(),
 })
 
 export const createProposalSchema = z.object({

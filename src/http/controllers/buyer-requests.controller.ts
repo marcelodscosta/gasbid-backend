@@ -52,9 +52,7 @@ export async function listOpportunitiesController(req: FastifyRequest, reply: Fa
   const user = req.user as JWTUser
   const { page, limit } = paginationSchema.parse(req.query)
   const { showApplied } = req.query as { showApplied?: string }
-  console.log(`[Opportunities] Query: companyId=${user.companyId}, showApplied=${showApplied}`)
   const result = await listOpportunitiesUseCase(user.companyId, page, limit, showApplied === 'true')
-  console.log(`[Opportunities] Result: ${result.data.length} items`)
   return result
 }
 

@@ -31,9 +31,7 @@ export async function listProposalsController(req: FastifyRequest, reply: Fastif
 
 export async function listSupplierProposalsController(req: FastifyRequest) {
   const user = req.user as JWTUser
-  console.log(`[MyProposals] Query: companyId=${user.companyId}`)
   const result = await listSupplierProposalsUseCase(user.companyId)
-  console.log(`[MyProposals] Result: ${result.length} items`)
   return result
 }
 

@@ -8,7 +8,7 @@ export async function rateOrderUseCase(
   stars: number,
   comment?: string,
 ) {
-  if (stars < 1 || stars > 5) {
+  if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
     throw new AppError('A nota deve ser de 1 a 5 estrelas')
   }
 
@@ -28,60 +28,56 @@ export async function rateOrderUseCase(
     throw new AppError('Apenas pedidos concluídos (DELIVERED) podem ser avaliados')
   }
 
-  const existingRating = await prisma.supplierRating.findUnique({
-    where: { orderId },
-  })
-
-  const starsDisplay = '⭐'.repeat(stars)
-
-  if (existingRating) {
-    const result = await prisma.supplierRating.update({
+  // Grava a avaliação e recalcula a média pré-computada da empresa na mesma transação,
+  // evitando carregar todas as avaliações a cada leitura (ver Company.ratingAvg/ratingCount).
+  const result = await prisma.$transaction(async tx => {
+    const rating = await tx.supplierRating.upsert({
       where: { orderId },
-      data: { stars, comment },
+      create: {
+        orderId,
+        buyerCompanyId,
+        supplierCompanyId: order.supplierCompanyId,
+        stars,
+        comment,
+      },
+      update: { stars, comment },
     })
 
-    sendPushToCompany(
-      order.supplierCompanyId,
-      `Nova avaliação: ${starsDisplay}`,
-      comment ? `"${comment.substring(0, 80)}"` : `Você recebeu ${stars} estrela${stars > 1 ? 's' : ''}!`,
-      { type: 'RATING_RECEIVED', orderId }
-    )
+    const agg = await tx.supplierRating.aggregate({
+      where: { supplierCompanyId: order.supplierCompanyId },
+      _avg: { stars: true },
+      _count: { _all: true },
+    })
+    await tx.company.update({
+      where: { id: order.supplierCompanyId },
+      data: {
+        ratingAvg: agg._avg.stars == null ? null : Number(agg._avg.stars.toFixed(1)),
+        ratingCount: agg._count._all,
+      },
+    })
 
-    return result
-  }
-
-  const result = await prisma.supplierRating.create({
-    data: {
-      orderId,
-      buyerCompanyId,
-      supplierCompanyId: order.supplierCompanyId,
-      stars,
-      comment,
-    },
+    return rating
   })
 
   sendPushToCompany(
     order.supplierCompanyId,
-    `Nova avaliação: ${starsDisplay}`,
+    `Nova avaliação: ${'⭐'.repeat(stars)}`,
     comment ? `"${comment.substring(0, 80)}"` : `Você recebeu ${stars} estrela${stars > 1 ? 's' : ''}!`,
-    { type: 'RATING_RECEIVED', orderId }
+    { type: 'RATING_RECEIVED', orderId },
   )
 
   return result
 }
 
 export async function getSupplierRatingSummary(supplierCompanyId: string) {
-  const ratings = await prisma.supplierRating.findMany({
-    where: { supplierCompanyId },
-    select: { stars: true },
+  const company = await prisma.company.findUnique({
+    where: { id: supplierCompanyId },
+    select: { ratingAvg: true, ratingCount: true },
   })
 
-  if (ratings.length === 0) {
+  if (!company || company.ratingCount === 0) {
     return { average: null, count: 0 } // No fake initial balance
   }
 
-  const total = ratings.reduce((acc, r) => acc + r.stars, 0)
-  const average = Number((total / ratings.length).toFixed(1))
-
-  return { average, count: ratings.length }
+  return { average: company.ratingAvg, count: company.ratingCount }
 }

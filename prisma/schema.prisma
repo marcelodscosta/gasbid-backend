@@ -21,6 +21,7 @@ model User {
   pushTokens    PushToken[]
   company       Company?       @relation(fields: [companyId], references: [id])
 
+  @@index([companyId])
   @@map("users")
 }
 
@@ -32,6 +33,7 @@ model RefreshToken {
   createdAt DateTime @default(now()) @map("created_at")
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId])
   @@map("refresh_tokens")
 }
 
@@ -43,6 +45,9 @@ model Company {
   email             String?
   role              Role
   active            Boolean            @default(true)
+  ratingAvg         Float?             @map("rating_avg")
+  ratingCount       Int                @default(0) @map("rating_count")
+  trackingEnabled   Boolean            @default(false) @map("tracking_enabled")
   createdAt         DateTime           @default(now()) @map("created_at")
   updatedAt         DateTime           @updatedAt @map("updated_at")
   addresses         Address[]
@@ -56,6 +61,7 @@ model Company {
   ratingsReceived   SupplierRating[]   @relation("SupplierRatings")
   users             User[]
   supplierProducts  SupplierProduct[]
+  liveLocation      SupplierLiveLocation?
 
   @@map("companies")
 }
@@ -77,6 +83,8 @@ model Address {
   company       Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
   buyerRequests BuyerRequest[]
 
+  @@index([companyId])
+  @@index([city, state])
   @@map("addresses")
 }
 
@@ -102,7 +110,7 @@ model SupplierProduct {
   active            Boolean     @default(true)
   biddingMode       BiddingMode @default(BOTH) @map("bidding_mode")
   
-  defaultPrice      Float?      @map("default_price")
+  defaultPrice      Decimal?    @map("default_price") @db.Decimal(10, 2)
 
   createdAt         DateTime    @default(now()) @map("created_at")
   updatedAt         DateTime    @updatedAt @map("updated_at")
@@ -121,6 +129,7 @@ model BuyerRequest {
   deadline       DateTime
   expiresAt      DateTime           @map("expires_at")
   observations   String?
+  paymentMethod  PaymentMethod?     @map("payment_method")
   status             BuyerRequestStatus @default(DRAFT)
   autoAcceptMode     AutoAcceptMode     @default(NONE) @map("auto_accept_mode")
   counterOfferRounds Int                @default(0) @map("counter_offer_rounds")
@@ -132,6 +141,8 @@ model BuyerRequest {
   order          Order?
   proposals      SupplierProposal[]
 
+  @@index([buyerCompanyId, status])
+  @@index([status, expiresAt])
   @@map("buyer_requests")
 }
 
@@ -144,6 +155,7 @@ model BuyerRequestItem {
   product        Product      @relation(fields: [productId], references: [id])
   supplierProposalItems SupplierProposalItem[]
 
+  @@index([buyerRequestId])
   @@map("buyer_request_items")
 }
 
@@ -156,6 +168,8 @@ model SupplierCoverage {
   createdAt         DateTime @default(now()) @map("created_at")
   supplierCompany   Company  @relation(fields: [supplierCompanyId], references: [id], onDelete: Cascade)
 
+  @@index([city, state])
+  @@index([supplierCompanyId])
   @@map("supplier_coverages")
 }
 
@@ -163,7 +177,7 @@ model SupplierProposal {
   id                String         @id @default(cuid())
   buyerRequestId    String         @map("buyer_request_id")
   supplierCompanyId String         @map("supplier_company_id")
-  freightPrice      Float          @default(0) @map("freight_price")
+  freightPrice      Decimal        @default(0) @map("freight_price") @db.Decimal(10, 2)
   deliveryDeadline  DateTime       @map("delivery_deadline")
   paymentTerms      String?        @map("payment_terms")
   observations      String?
@@ -176,6 +190,7 @@ model SupplierProposal {
   items             SupplierProposalItem[]
 
   @@unique([buyerRequestId, supplierCompanyId])
+  @@index([supplierCompanyId, status])
   @@map("supplier_proposals")
 }
 
@@ -183,10 +198,11 @@ model SupplierProposalItem {
   id                 String           @id @default(cuid())
   supplierProposalId String           @map("supplier_proposal_id")
   buyerRequestItemId String           @map("buyer_request_item_id")
-  unitPrice          Float            @map("unit_price")
+  unitPrice          Decimal          @map("unit_price") @db.Decimal(10, 2)
   supplierProposal   SupplierProposal @relation(fields: [supplierProposalId], references: [id], onDelete: Cascade)
   buyerRequestItem   BuyerRequestItem @relation(fields: [buyerRequestItemId], references: [id])
 
+  @@index([supplierProposalId])
   @@map("supplier_proposal_items")
 }
 
@@ -196,8 +212,8 @@ model Order {
   proposalId        String           @unique @map("proposal_id")
   buyerCompanyId    String           @map("buyer_company_id")
   supplierCompanyId String           @map("supplier_company_id")
-  status            OrderStatus      @default(CREATED)
-  totalPrice        Float            @map("total_price")
+  status            OrderStatus      @default(PENDING_CONFIRMATION)
+  totalPrice        Decimal          @map("total_price") @db.Decimal(10, 2)
   confirmedAt       DateTime?        @map("confirmed_at")
   deliveredAt       DateTime?        @map("delivered_at")
   createdAt         DateTime         @default(now()) @map("created_at")
@@ -210,6 +226,9 @@ model Order {
   rating            SupplierRating?
   supplierCompany   Company          @relation("SupplierOrders", fields: [supplierCompanyId], references: [id])
 
+  @@index([buyerCompanyId, status])
+  @@index([supplierCompanyId, status])
+  @@index([status, createdAt])
   @@map("orders")
 }
 
@@ -221,6 +240,7 @@ model OrderTimeline {
   createdAt DateTime    @default(now()) @map("created_at")
   order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
+  @@index([orderId, createdAt])
   @@map("order_timelines")
 }
 
@@ -233,13 +253,14 @@ model OrderMessage {
   order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   sender    User     @relation(fields: [senderId], references: [id])
 
+  @@index([orderId, createdAt])
   @@map("order_messages")
 }
 
 model CreditWallet {
   id        String   @id @default(cuid())
   companyId String   @unique @map("company_id")
-  balance   Float    @default(0)
+  balance   Decimal  @default(0) @db.Decimal(12, 2)
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
   company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -260,6 +281,7 @@ model SupplierRating {
   buyerCompany    Company @relation("BuyerRatings", fields: [buyerCompanyId], references: [id], onDelete: Cascade)
   supplierCompany Company @relation("SupplierRatings", fields: [supplierCompanyId], references: [id], onDelete: Cascade)
 
+  @@index([supplierCompanyId])
   @@map("supplier_ratings")
 }
 
@@ -282,7 +304,32 @@ model PushToken {
   updatedAt DateTime @updatedAt @map("updated_at")
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId, active])
   @@map("push_tokens")
+}
+
+/// Última posição conhecida do revendedor (sem histórico, por LGPD).
+model SupplierLiveLocation {
+  companyId String   @id @map("company_id")
+  userId    String   @map("user_id")
+  latitude  Float
+  longitude Float
+  heading   Float?
+  speed     Float?
+  isOnline  Boolean  @default(false) @map("is_online")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([isOnline, updatedAt])
+  @@map("supplier_live_locations")
+}
+
+enum PaymentMethod {
+  PIX
+  CASH
+  CREDIT
+  DEBIT
+  BOLETO
 }
 
 enum Role {
@@ -324,7 +371,6 @@ enum ProposalStatus {
 
 enum OrderStatus {
   PENDING_CONFIRMATION
-  CREATED
   CONFIRMED
   IN_DELIVERY
   DELIVERED

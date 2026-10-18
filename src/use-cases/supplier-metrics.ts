@@ -1,4 +1,6 @@
 import { prisma } from '../lib/prisma'
+import { toNum } from '../lib/money'
+import { ACTIVE_ORDER_STATUSES } from '../lib/state-machine'
 
 export async function getSupplierMetricsUseCase(companyId: string) {
   // 1. Get supplier coverage cities
@@ -38,7 +40,7 @@ export async function getSupplierMetricsUseCase(companyId: string) {
   const pendingDeliveries = await prisma.order.count({
     where: {
       supplierCompanyId: companyId,
-      status: { in: ['CREATED', 'CONFIRMED', 'IN_DELIVERY'] }
+      status: { in: ACTIVE_ORDER_STATUSES }
     }
   })
 
@@ -80,7 +82,7 @@ export async function getSupplierMetricsUseCase(companyId: string) {
       city: req.address.city,
       status: req.status,
       result,
-      myPrice: myProposal?.items.reduce((sum, i) => sum + i.unitPrice, 0), // This is not quite right but works for display
+      myPrice: myProposal?.items.reduce((sum, i) => sum + toNum(i.unitPrice), 0), // This is not quite right but works for display
       winningPrice: req.order?.totalPrice,
       updatedAt: req.updatedAt
     }
