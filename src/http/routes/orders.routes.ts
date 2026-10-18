@@ -1,3 +1,4 @@
+import { prisma } from '../../lib/prisma'
 import { FastifyInstance } from 'fastify'
 import { authenticate } from '../middlewares/auth'
 import {
@@ -25,6 +26,13 @@ export async function orderRoutes(app: FastifyInstance) {
   app.patch('/orders/:id/status', updateOrderStatusController)
   app.get('/orders/:id/messages', listMessagesController)
   app.post('/orders/:id/messages', sendMessageController)
+
+  // Janela de propostas (leitura para qualquer usuário autenticado; edição é só do admin)
+  app.get('/settings/proposal-window', async (_req, reply) => {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'proposal_window_minutes' } })
+    const parsed = setting ? parseInt(setting.value, 10) : NaN
+    return reply.send({ proposalWindowMinutes: Number.isFinite(parsed) && parsed > 0 ? parsed : 5 })
+  })
 }
 
 export async function adminRoutes(app: FastifyInstance) {
