@@ -1,194 +1,150 @@
 import { prisma } from '../src/lib/prisma'
 import bcrypt from 'bcryptjs'
 
+// Seed idempotente: pode rodar várias vezes sem duplicar dados.
+// Senha padrão de todos os usuários de demo (sobrescreva com SEED_PASSWORD).
+const PASSWORD = process.env.SEED_PASSWORD ?? 'gasbid123'
+const CITY = 'Petrolina'
+const STATE = 'PE'
+
+type Seller = {
+  name: string
+  cnpj: string
+  email: string
+  phone: string
+  contact: string
+  street: string
+  number: string
+  neighborhood: string
+  zipCode: string
+  lat: number
+  lng: number
+}
+
+const SUPPLIERS: Seller[] = [
+  { name: 'Gás Centro Petrolina', cnpj: '11111111000101', email: 'revenda1@gasbid.com.br', phone: '87999990101', contact: 'Carlos Lima', street: 'Rua da Aurora', number: '120', neighborhood: 'Centro', zipCode: '56302000', lat: -9.3891, lng: -40.5030 },
+  { name: 'Areia Branca Gás', cnpj: '22222222000102', email: 'revenda2@gasbid.com.br', phone: '87999990102', contact: 'Ana Souza', street: 'Av. das Nações', number: '850', neighborhood: 'Areia Branca', zipCode: '56330000', lat: -9.3812, lng: -40.4925 },
+  { name: 'Gás Jardim Maravilha', cnpj: '33333333000103', email: 'revenda3@gasbid.com.br', phone: '87999990103', contact: 'Pedro Alves', street: 'Rua Sete', number: '45', neighborhood: 'Jardim Maravilha', zipCode: '56310000', lat: -9.4075, lng: -40.5160 },
+  { name: 'Cohab Gás Distribuidora', cnpj: '44444444000104', email: 'revenda4@gasbid.com.br', phone: '87999990104', contact: 'Juliana Rocha', street: 'Av. Cohab Massangano', number: '300', neighborhood: 'Cohab Massangano', zipCode: '56312000', lat: -9.4002, lng: -40.5305 },
+  { name: 'Gás Gercino Coelho', cnpj: '55555555000105', email: 'revenda5@gasbid.com.br', phone: '87999990105', contact: 'Marcos Silva', street: 'Rua Pernambuco', number: '210', neighborhood: 'Gercino Coelho', zipCode: '56306000', lat: -9.3720, lng: -40.5100 },
+]
+
+const BUYERS: Seller[] = [
+  { name: 'Restaurante Sabor do Sertão', cnpj: '66666666000106', email: 'comprador1@gasbid.com.br', phone: '87999990201', contact: 'João Pereira', street: 'Av. Guararapes', number: '500', neighborhood: 'Centro', zipCode: '56302100', lat: -9.3920, lng: -40.5060 },
+  { name: 'Padaria Vale do São Francisco', cnpj: '77777777000107', email: 'comprador2@gasbid.com.br', phone: '87999990202', contact: 'Fernanda Costa', street: 'Rua José de Sá', number: '78', neighborhood: 'Vila Mocó', zipCode: '56304000', lat: -9.3955, lng: -40.4980 },
+  { name: 'Hotel Orla Petrolina', cnpj: '88888888000108', email: 'comprador3@gasbid.com.br', phone: '87999990203', contact: 'Ricardo Melo', street: 'Av. Cardoso de Sá', number: '1500', neighborhood: 'Orla', zipCode: '56328000', lat: -9.3990, lng: -40.4890 },
+]
+
+async function upsertCompanyWithUser(s: Seller, role: 'SUPPLIER' | 'BUYER', hash: string) {
+  const company = await prisma.company.upsert({
+    where: { cnpj: s.cnpj },
+    update: { name: s.name, email: s.email, phone: s.phone, active: true },
+    create: { name: s.name, cnpj: s.cnpj, email: s.email, phone: s.phone, role },
+  })
+
+  // Endereço: recria o principal para não duplicar
+  await prisma.address.deleteMany({ where: { companyId: company.id } })
+  await prisma.address.create({
+    data: {
+      companyId: company.id,
+      street: s.street,
+      number: s.number,
+      neighborhood: s.neighborhood,
+      city: CITY,
+      state: STATE,
+      zipCode: s.zipCode,
+      latitude: s.lat,
+      longitude: s.lng,
+      isMain: true,
+    },
+  })
+
+  await prisma.user.upsert({
+    where: { email: s.email },
+    update: { passwordHash: hash, companyId: company.id, role },
+    create: { name: s.contact, email: s.email, passwordHash: hash, role, companyId: company.id },
+  })
+
+  return company
+}
+
 async function main() {
   console.log('🌱 Seeding database...')
 
-  // Products
-  const p13 = await prisma.product.upsert({
-    where: { sku: 'GLP-P13' },
-    update: {},
-    create: {
-      name: 'GLP P13 (13kg)',
-      sku: 'GLP-P13',
-      description: 'Botijão de gás GLP 13kg, uso residencial e comercial',
-      unit: 'unidade',
-      weightKg: 13,
-    },
-  })
+  // 1. Remove todas as cotações (e o que depende delas)
+  await prisma.$transaction([
+    prisma.supplierRating.deleteMany(),
+    prisma.orderMessage.deleteMany(),
+    prisma.orderTimeline.deleteMany(),
+    prisma.order.deleteMany(),
+    prisma.supplierProposalItem.deleteMany(),
+    prisma.supplierProposal.deleteMany(),
+    prisma.buyerRequestItem.deleteMany(),
+    prisma.buyerRequest.deleteMany(),
+  ])
+  console.log('🧹 Cotações, propostas e pedidos removidos')
 
-  const p20 = await prisma.product.upsert({
-    where: { sku: 'GLP-P20' },
-    update: {},
-    create: {
-      name: 'GLP P20 (20kg)',
-      sku: 'GLP-P20',
-      description: 'Botijão de gás GLP 20kg, uso comercial',
-      unit: 'unidade',
-      weightKg: 20,
-    },
-  })
+  // 2. Produtos
+  const products = await Promise.all(
+    [
+      { sku: 'GLP-P13', name: 'GLP P13 (13kg)', description: 'Botijão de gás GLP 13kg, uso residencial e comercial', weightKg: 13, price: 110 },
+      { sku: 'GLP-P20', name: 'GLP P20 (20kg)', description: 'Botijão de gás GLP 20kg, uso comercial', weightKg: 20, price: 190 },
+      { sku: 'GLP-P45', name: 'GLP P45 (45kg)', description: 'Cilindro de gás GLP 45kg, uso industrial', weightKg: 45, price: 420 },
+    ].map(async ({ price, ...p }) => ({
+      price,
+      product: await prisma.product.upsert({
+        where: { sku: p.sku },
+        update: {},
+        create: { ...p, unit: 'unidade' },
+      }),
+    })),
+  )
+  console.log('✅ Produtos:', products.map((p) => p.product.sku).join(', '))
 
-  const p45 = await prisma.product.upsert({
-    where: { sku: 'GLP-P45' },
-    update: {},
-    create: {
-      name: 'GLP P45 (45kg)',
-      sku: 'GLP-P45',
-      description: 'Cilindro de gás GLP 45kg, uso industrial',
-      unit: 'unidade',
-      weightKg: 45,
-    },
-  })
+  const hash = await bcrypt.hash(PASSWORD, 10)
 
-  console.log('✅ Products created:', p13.sku, p20.sku, p45.sku)
-
-  // Admin company
+  // 3. Admin
   const adminCompany = await prisma.company.upsert({
     where: { cnpj: '00000000000000' },
     update: {},
-    create: {
-      name: 'GasBid Plataforma',
-      cnpj: '00000000000000',
-      email: 'admin@gasbid.com.br',
-      role: 'ADMIN',
-    },
+    create: { name: 'GasBid Plataforma', cnpj: '00000000000000', email: 'admin@gasbid.com.br', role: 'ADMIN' },
   })
-
-  // Admin user
-  const adminHash = await bcrypt.hash('admin123', 10)
   await prisma.user.upsert({
     where: { email: 'admin@gasbid.com.br' },
-    update: {},
-    create: {
-      name: 'Admin GasBid',
-      email: 'admin@gasbid.com.br',
-      passwordHash: adminHash,
-      role: 'ADMIN',
-      companyId: adminCompany.id,
-    },
+    update: { passwordHash: hash },
+    create: { name: 'Admin GasBid', email: 'admin@gasbid.com.br', passwordHash: hash, role: 'ADMIN', companyId: adminCompany.id },
   })
 
-  // Buyer company
-  const buyerCompany = await prisma.company.upsert({
-    where: { cnpj: '12345678000195' },
-    update: {},
-    create: {
-      name: 'Restaurante Sabor & Cia',
-      cnpj: '12345678000195',
-      email: 'contato@saborecia.com.br',
-      phone: '11999990001',
-      role: 'BUYER',
-    },
-  })
+  // 4. Revendas (com cobertura em Petrolina e catálogo de produtos)
+  for (const [i, s] of SUPPLIERS.entries()) {
+    const company = await upsertCompanyWithUser(s, 'SUPPLIER', hash)
 
-  const buyerAddress = await prisma.address.create({
-    data: {
-      companyId: buyerCompany.id,
-      street: 'Rua das Flores',
-      number: '100',
-      neighborhood: 'Centro',
-      city: 'São Paulo',
-      state: 'SP',
-      zipCode: '01310100',
-      isMain: true,
-      latitude: -23.5505,
-      longitude: -46.6333,
-    },
-  })
+    await prisma.supplierCoverage.upsert({
+      where: { id: `coverage-petrolina-${company.id}` },
+      update: {},
+      create: { id: `coverage-petrolina-${company.id}`, supplierCompanyId: company.id, city: CITY, state: STATE, radiusKm: 30 },
+    })
 
-  const buyerHash = await bcrypt.hash('buyer123', 10)
-  await prisma.user.upsert({
-    where: { email: 'comprador@saborecia.com.br' },
-    update: {},
-    create: {
-      name: 'João Comprador',
-      email: 'comprador@saborecia.com.br',
-      passwordHash: buyerHash,
-      role: 'BUYER',
-      companyId: buyerCompany.id,
-    },
-  })
+    for (const { product, price } of products) {
+      const defaultPrice = price + i * 2 // pequenas variações de preço entre revendas
+      await prisma.supplierProduct.upsert({
+        where: { supplierCompanyId_productId: { supplierCompanyId: company.id, productId: product.id } },
+        update: { defaultPrice, active: true },
+        create: { supplierCompanyId: company.id, productId: product.id, defaultPrice, biddingMode: 'BOTH' },
+      })
+    }
+  }
+  console.log(`✅ ${SUPPLIERS.length} revendas criadas em ${CITY}`)
 
-  // Supplier company
-  const supplierCompany = await prisma.company.upsert({
-    where: { cnpj: '98765432000177' },
-    update: {},
-    create: {
-      name: 'GasMax Distribuidora',
-      cnpj: '98765432000177',
-      email: 'contato@gasmax.com.br',
-      phone: '11999990002',
-      role: 'SUPPLIER',
-    },
-  })
+  // 5. Compradores
+  for (const b of BUYERS) await upsertCompanyWithUser(b, 'BUYER', hash)
+  console.log(`✅ ${BUYERS.length} compradores criados`)
 
-  await prisma.supplierCoverage.upsert({
-    where: { id: 'coverage-sp-01' },
-    update: {},
-    create: {
-      id: 'coverage-sp-01',
-      supplierCompanyId: supplierCompany.id,
-      city: 'São Paulo',
-      state: 'SP',
-      radiusKm: 50,
-    },
-  })
-
-  const supplierHash = await bcrypt.hash('supplier123', 10)
-  const supplierUser = await prisma.user.upsert({
-    where: { email: 'vendas@gasmax.com.br' },
-    update: {},
-    create: {
-      name: 'Maria Fornecedora',
-      email: 'vendas@gasmax.com.br',
-      passwordHash: supplierHash,
-      role: 'SUPPLIER',
-      companyId: supplierCompany.id,
-    },
-  })
-
-  // Add address for supplier
-  await prisma.address.create({
-    data: {
-      companyId: supplierCompany.id,
-      street: 'Av. Paulista',
-      number: '1000',
-      neighborhood: 'Bela Vista',
-      city: 'São Paulo',
-      state: 'SP',
-      zipCode: '01310100',
-      isMain: true,
-      latitude: -23.5617,
-      longitude: -46.6560,
-    },
-  })
-
-  // Sample BuyerRequest with multiple items
-  const request = await prisma.buyerRequest.create({
-    data: {
-      buyerCompanyId: buyerCompany.id,
-      addressId: buyerAddress.id,
-      deadline: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      observations: 'Entrega no horário comercial. Pedido de teste multi-item.',
-      status: 'OPEN',
-      items: {
-        create: [
-          { productId: p13.id, quantity: 10 },
-          { productId: p20.id, quantity: 5 },
-        ]
-      }
-    },
-  })
-
-  console.log('✅ Sample buyer request created:', request.id)
   console.log('')
-  console.log('🔑 Demo credentials:')
-  console.log('  Admin:    admin@gasbid.com.br / admin123')
-  console.log('  Buyer:    comprador@saborecia.com.br / buyer123')
-  console.log('  Supplier: vendas@gasmax.com.br / supplier123')
-  console.log('')
+  console.log(`🔑 Senha de todos os usuários: ${PASSWORD}`)
+  console.log('  Admin:       admin@gasbid.com.br')
+  SUPPLIERS.forEach((s) => console.log(`  Revenda:     ${s.email}  (${s.neighborhood})`))
+  BUYERS.forEach((b) => console.log(`  Comprador:   ${b.email}  (${b.neighborhood})`))
   console.log('✅ Seed completed!')
 }
 
